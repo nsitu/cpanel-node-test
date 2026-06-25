@@ -1,0 +1,154 @@
+name: Deploy to cPanel Passenger
+
+on:
+  push:
+    branches: [main]
+
+env:
+  HOST: phoenix.sheridanc.on.ca
+  PORT: 22
+  BASE_DOMAIN: phoenix.sheridanc.on.ca
+  NODE_BIN: /opt/cpanel/ea-nodejs22/bin
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.CPANEL_SSH_KEY }}
+          known_hosts: unnecessary
+          if_key_exists: replace
+
+      - name: Trust SSH host
+        run: |
+          ssh-keyscan -p "$PORT" "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Copy repo and deploy
+        env:
+          CPANEL_USER: ${{ secrets.CPANEL_USER }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          APP_DIR="/home/${CPANEL_USER}/${REPO_NAME}"
+          BASE_URI="/${REPO_NAME}"
+          CPANEL_DOMAIN="${CPANEL_USER}.${BASE_DOMAIN}"
+
+          echo "Repo: $REPO_NAME"
+          echo "App dir: $APP_DIR"
+          echo "Domain: $CPANEL_DOMAIN"
+          echo "Base URI: $BASE_URI"
+
+          ssh -p "$PORT" "${CPANEL_USER}@${HOST}" "mkdir -p '$APP_DIR'"
+
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude ".env" \
+            -e "ssh -p $PORT" \
+            ./ "${CPANEL_USER}@${HOST}:$APP_DIR/"
+
+          ssh -p "$PORT" "${CPANEL_USER}@${HOST}" \
+            "REPO_NAME='$REPO_NAME' APP_DIR='$APP_DIR' BASE_URI='$BASE_URI' CPANEL_DOMAIN='$CPANEL_DOMAIN' NODE_BIN='$NODE_BIN' bash -s" <<'EOF'
+          set -e
+
+          export PATH="$NODE_BIN:$PATH"
+
+          cd "$APP_DIR"
+
+          echo "Using Node:"
+          node -v
+          npm -v
+
+          echo "Detecting Node entrypoint..."
+
+          ENTRYPOINT=$(python3 - <<'PY'
+          import json, os, sys
+
+          candidates = []
+
+          if os.path.exists("package.json"):
+              try:
+                  with open("package.json") as f:
+                      pkg = json.load(f)
+                  main = pkg.get("main")
+                  if main:
+                      candidates.append(main)
+              except Exception:
+                  pass
+
+          candidates += ["app.js", "server.js", "index.js"]
+
+          for candidate in candidates:
+              if os.path.isfile(candidate):
+                  print(candidate)
+                  sys.exit(0)
+
+          raise SystemExit("No Node entrypoint found. Expected package.json main, app.js, server.js, or index.js.")
+          PY
+          )
+
+          echo "Detected entrypoint: $ENTRYPOINT"
+
+          echo "Checking existing Passenger apps..."
+          uapi --output=json PassengerApps list_applications > /tmp/passenger_apps.json
+
+          APP_EXISTS=$(python3 - <<PY
+          import json, os
+          name = os.environ["REPO_NAME"]
+
+          with open("/tmp/passenger_apps.json") as f:
+              data = json.load(f)
+
+          apps = data.get("result", {}).get("data", {})
+          print("yes" if name in apps else "no")
+          PY
+          )
+
+          if [ "$APP_EXISTS" = "no" ]; then
+            echo "Registering Passenger app: $REPO_NAME"
+
+            uapi PassengerApps register_application \
+              name="$REPO_NAME" \
+              path="$APP_DIR" \
+              domain="$CPANEL_DOMAIN" \
+              base_uri="$BASE_URI" \
+              startup_file="$ENTRYPOINT" \
+              deployment_mode="production" \
+              enabled="1"
+          else
+            echo "Passenger app already registered: $REPO_NAME"
+
+            echo "Updating Passenger app configuration..."
+            uapi PassengerApps edit_application \
+              name="$REPO_NAME" \
+              path="$APP_DIR" \
+              domain="$CPANEL_DOMAIN" \
+              base_uri="$BASE_URI" \
+              startup_file="$ENTRYPOINT" \
+              deployment_mode="production" \
+              enabled="1" || true
+          fi
+
+          echo "Ensuring dependencies..."
+          uapi PassengerApps ensure_deps type=npm app_path="$APP_DIR" \
+            || uapi PassengerApps ensure_deps type=npm app_path="$REPO_NAME"
+
+          if [ -f package.json ] && grep -q '"build"' package.json; then
+            echo "Running build script..."
+            npm run build
+          else
+            echo "No build script found."
+          fi
+
+          echo "Restarting Passenger app..."
+          mkdir -p tmp
+          touch tmp/restart.txt
+
+          echo "Deployment complete."
+          echo "App should be reachable at: https://${CPANEL_DOMAIN}${BASE_URI}"
+          EOF
