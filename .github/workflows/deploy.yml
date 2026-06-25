@@ -7,7 +7,6 @@ on:
 env:
   HOST: phoenix.sheridanc.on.ca
   PORT: 22
-  BASE_DOMAIN: phoenix.sheridanc.on.ca
   NODE_BIN: /opt/cpanel/ea-nodejs22/bin
 
 jobs:
@@ -35,12 +34,6 @@ jobs:
           REPO_NAME="${GITHUB_REPOSITORY##*/}"
           APP_DIR="/home/${CPANEL_USER}/${REPO_NAME}"
           BASE_URI="/${REPO_NAME}"
-          CPANEL_DOMAIN="${CPANEL_USER}.${BASE_DOMAIN}"
-
-          echo "Repo: $REPO_NAME"
-          echo "App dir: $APP_DIR"
-          echo "Domain: $CPANEL_DOMAIN"
-          echo "Base URI: $BASE_URI"
 
           ssh -p "$PORT" "${CPANEL_USER}@${HOST}" "mkdir -p '$APP_DIR'"
 
@@ -53,10 +46,36 @@ jobs:
             ./ "${CPANEL_USER}@${HOST}:$APP_DIR/"
 
           ssh -p "$PORT" "${CPANEL_USER}@${HOST}" \
-            "REPO_NAME='$REPO_NAME' APP_DIR='$APP_DIR' BASE_URI='$BASE_URI' CPANEL_DOMAIN='$CPANEL_DOMAIN' NODE_BIN='$NODE_BIN' bash -s" <<'EOF'
+            "REPO_NAME='$REPO_NAME' APP_DIR='$APP_DIR' BASE_URI='$BASE_URI' NODE_BIN='$NODE_BIN' bash -s" <<'EOF'
           set -e
 
           export PATH="$NODE_BIN:$PATH"
+
+          uapi_json() {
+            local output
+            output=$(uapi --output=json "$@")
+            echo "$output"
+
+            UAPI_OUTPUT="$output" python3 - <<'PY'
+          import os, sys, json
+          data = json.loads(os.environ["UAPI_OUTPUT"])
+          result = data.get("result", {})
+          if result.get("status") != 1:
+              print("UAPI failed:", result.get("errors"), file=sys.stderr)
+              sys.exit(1)
+          PY
+          }
+
+          CPANEL_DOMAIN=$(uapi --output=json DomainInfo primary_domain | python3 -c '
+          import sys, json
+          data=json.load(sys.stdin)
+          print(data["result"]["data"]["primary_domain"])
+          ')
+
+          echo "Repo: $REPO_NAME"
+          echo "App dir: $APP_DIR"
+          echo "Domain: $CPANEL_DOMAIN"
+          echo "Base URI: $BASE_URI"
 
           cd "$APP_DIR"
 
@@ -65,7 +84,6 @@ jobs:
           npm -v
 
           echo "Detecting Node entrypoint..."
-
           ENTRYPOINT=$(python3 - <<'PY'
           import json, os, sys
 
@@ -112,7 +130,7 @@ jobs:
           if [ "$APP_EXISTS" = "no" ]; then
             echo "Registering Passenger app: $REPO_NAME"
 
-            uapi PassengerApps register_application \
+            uapi_json PassengerApps register_application \
               name="$REPO_NAME" \
               path="$APP_DIR" \
               domain="$CPANEL_DOMAIN" \
@@ -124,19 +142,18 @@ jobs:
             echo "Passenger app already registered: $REPO_NAME"
 
             echo "Updating Passenger app configuration..."
-            uapi PassengerApps edit_application \
+            uapi_json PassengerApps edit_application \
               name="$REPO_NAME" \
               path="$APP_DIR" \
               domain="$CPANEL_DOMAIN" \
               base_uri="$BASE_URI" \
               startup_file="$ENTRYPOINT" \
               deployment_mode="production" \
-              enabled="1" || true
+              enabled="1"
           fi
 
           echo "Ensuring dependencies..."
-          uapi PassengerApps ensure_deps type=npm app_path="$APP_DIR" \
-            || uapi PassengerApps ensure_deps type=npm app_path="$REPO_NAME"
+          uapi_json PassengerApps ensure_deps type=npm app_path="$REPO_NAME"
 
           if [ -f package.json ] && grep -q '"build"' package.json; then
             echo "Running build script..."
