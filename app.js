@@ -10,18 +10,10 @@ router.get("/", (req, res) => {
   res.send("Hello from Express");
 });
 
-router.get("/env", (req, res) => {
-  res.json({
-    originalUrl: req.originalUrl,
-    baseUrl: req.baseUrl,
-    path: req.path,
-    baseUri,
-  });
-});
 
 app.use(baseUri, router);
 
 app.listen(port, "127.0.0.1", () => {
   console.log(`Listening on ${port}`);
-  console.log(`Passenger base URI: ${baseUri}`);
+  console.log(`Base URI: ${baseUri}`);
 });
