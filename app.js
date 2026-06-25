@@ -6,6 +6,15 @@ const router = express.Router();
 const port = process.env.PORT || 3000;
 const baseUri = process.env.BASE_URI || '/';
 
+app.get("/cpanel-node-test/env", (req, res) => {
+  res.json({
+    originalUrl: req.originalUrl,
+    baseUrl: req.baseUrl,
+    path: req.path,
+    env: process.env
+  });
+});
+
 router.get('/', (req, res) => {
   res.send('Hello from Express');
 });
