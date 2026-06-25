@@ -29,6 +29,7 @@ jobs:
       - name: Remove passphrase from SSH key
         run: |
           if [ -n "$CPANEL_SSH_PASSWORD" ]; then
+            chmod 600 ~/.ssh/id_rsa
             ssh-keygen -p -P "$CPANEL_SSH_PASSWORD" -N "" -f ~/.ssh/id_rsa
           fi
         env:
